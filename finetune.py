@@ -95,7 +95,7 @@ def main(opt):
     torch.cuda.set_device(gpu)
     model = model.cuda(0)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001, weight_decay=4e-5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5, weight_decay=4e-5)
     criterion = get_loss(opt)
 
     best_acc = 0
@@ -172,20 +172,17 @@ def main(opt):
             torch.save({
                     "epoch": epoch + 1,
                     "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    # "scheduler": scheduler.state_dict(),
                     "accuracy": round(accuracy, 5),
                     "loss": round(loss_mean, 5),
                     "config": opt,
                 }, 
-                os.path.join("./artifacts_train", "checkpoints", opt.finetune_version, f"{epoch + 1}_accuracy_{accuracy:.5f}.pth"))
-        # scheduler.step()
+                os.path.join("./artifacts_finetune", "checkpoints", opt.finetune_version, f"{epoch + 1}_accuracy_{accuracy:.5f}.pth"))
 
 if __name__ == "__main__":
     from addict import Dict
-    from config import train_config
+    from config import finetune_conf
 
-    opt = Dict(train_config)
+    opt = Dict(finetune_conf)
     print(opt)
 
     main(opt)

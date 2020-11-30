@@ -44,7 +44,7 @@ def main(opt):
         log_versions = [
             int(name.split("_")[-1]) 
             for name in os.listdir(os.path.join("./artifacts_train", "logs")) 
-            if os.path.isdir(os.path.join(opt.logdir, name))
+            if os.path.isdir(os.path.join("./artifacts_train", "logs", name))
         ]
         current_version = f"version_{max(log_versions) + 1}"
     else:
