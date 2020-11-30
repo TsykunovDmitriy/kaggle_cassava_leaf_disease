@@ -71,6 +71,8 @@ def main(opt):
             albu.VerticalFlip(),
             albu.HorizontalFlip(),
             albu.RandomRotate90(),
+            albu.GaussNoise(),
+            albu.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.2, rotate_limit=45, p=0.4),
             albu.RandomCrop(512, 512),
             albu.Resize(256, 256),
             albu.Cutout(max_h_size=32, max_w_size=32, p=0.5),
