@@ -53,9 +53,9 @@ def main(opt):
 
 if __name__ == "__main__":
     from addict import Dict
-    from config import submit_conf
+    from config import submit_config
 
-    opt = Dict(submit_conf)
+    opt = Dict(submit_config)
     print(opt)
 
     main(opt)

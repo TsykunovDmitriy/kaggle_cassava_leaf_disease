@@ -16,7 +16,7 @@ train_config = {
     "iteration_per_epoch": None,
 }
 
-finetune_conf = {
+finetune_config = {
     **train_config,
     **{
         "finetune_version": "version_7",
@@ -25,7 +25,7 @@ finetune_conf = {
     }
 }
 
-submit_conf = {
+submit_config = {
     "data_dir": "/mnt/storage1024/datasets/cassava/test_images",
     "version": "version_0"
 }
