@@ -12,7 +12,7 @@ train_config = {
     "loss": "ce",
     "lr": 1e-3,
 
-    "num_epoch": 100,
+    "num_epoch": 20,
     "iteration_per_epoch": None,
 }
 
@@ -23,4 +23,9 @@ finetune_conf = {
         "lr": 1e-4,
         "num_epoch": 5,
     }
+}
+
+submit_conf = {
+    "data_dir": "/mnt/storage1024/datasets/cassava/test_images",
+    "version": "version_0"
 }
