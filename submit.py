@@ -1,13 +1,14 @@
 import os
 import cv2
+import timm
 import torch
-import GENet
 import pandas as pd
 from torch import nn
 import albumentations as albu
+import torch.nn.functional as F
 
 def main(opt):
-    device = torch.device("cuda:0")
+    device = torch.device("cpu")
 
     current_checkpoint = [
             os.path.join("./artifacts_train", "checkpoints", opt.version, name)
@@ -20,31 +21,39 @@ def main(opt):
     path_to_img = [os.path.join(opt.data_dir, name) for name in os.listdir(opt.data_dir) if not name.startswith(".")]
 
     val_trans = albu.Compose([
-            albu.CenterCrop(512, 512),
-            albu.Resize(256, 256),
-            albu.Normalize() 
+            albu.RandomResizedCrop(*opt.input_shape),
+            albu.VerticalFlip(),
+            albu.HorizontalFlip(),
+            albu.ShiftScaleRotate(p=0.5),
+            albu.HueSaturationValue(hue_shift_limit=0.2, sat_shift_limit=0.2, val_shift_limit=0.2, p=0.5),
+            albu.RandomBrightnessContrast(brightness_limit=(-0.1,0.1), contrast_limit=(-0.1, 0.1), p=0.5),
+            albu.Normalize()
         ])
 
-    model = GENet.genet_large(pretrained=False)
-    model.fc_linear = nn.Linear(model.last_channels, 5, bias=True)
-    model.load_state_dict(torch.load(checkpoint)["model_state_dict"])
-    gpu = 0
-    torch.cuda.set_device(gpu)
-    model = model.cuda(0)
+    model = timm.create_model(opt.model_arch, pretrained=True)
+    model.classifier = nn.Linear(model.classifier.in_features, 5)
+    model.load_state_dict(torch.load(checkpoint, map_location=device)["model_state_dict"])
+    model.to(device)
     model.eval()
 
     predicts = []
     for path in path_to_img:
         img = cv2.imread(path)
-        img_inp = val_trans(image=img)["image"]
-        img_inp = img_inp.transpose(2, 0, 1)
-        img_inp = torch.from_numpy(img_inp)[None, ...]
-        img_inp = img_inp.to(device)
+        tta_preds = []
+        for _ in range(opt.tta):
+            img_inp = val_trans(image=img)["image"]
+            img_inp = img_inp.transpose(2, 0, 1)
+            img_inp = torch.from_numpy(img_inp)[None, ...]
+            img_inp = img_inp.to(device)
 
-        with torch.no_grad():
-            logit = model(img_inp)
+            with torch.no_grad():
+                logit = model(img_inp)
+            
+            tta_preds.append(F.softmax(logit, dim=-1)[None, ...])
+        
+        tta_pred = torch.cat(tta_preds, dim=0).mean(dim=0)
 
-        _, predicted = torch.max(logit.data, 1)
+        _, predicted = torch.max(tta_pred.data, 1)
         predicts += list(predicted.cpu().numpy())
 
     submission_df = pd.DataFrame(zip(path_to_img, predicts), columns=["image_id", "label"])

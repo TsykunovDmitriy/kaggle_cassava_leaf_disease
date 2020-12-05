@@ -1,21 +1,72 @@
 import os
 import cv2
+import timm
 import torch
-import GENet
+import numpy as np
 import pandas as pd
 from torch import nn
 from tqdm import tqdm
-# import pretrainedmodels
 from losses import get_loss
 import albumentations as albu
 import torch.nn.functional as F
 from tensorboardX import SummaryWriter
 from torch.utils.data import Dataset, DataLoader
-from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR, CosineAnnealingWarmRestarts
 from torch.utils.data.sampler import WeightedRandomSampler
 
+rng = np.random.default_rng()
+
+def pgd_attack(
+            x, 
+            label, 
+            model, 
+            criterion,
+            alpha=0.05, 
+            attack_eps=0.1, 
+            attack_steps=2, 
+            random_init=False, 
+            target=None, 
+            clamp=(0, 1),
+        ):
+    
+    x_adv = x.clone()
+
+    if random_init:
+        # Flag to use random initialization
+        x_adv = x_adv + (torch.rand(x.size(), dtype=x.dtype, device=x.device) - 0.5) * 2 * attack_eps
+
+    for i in range(attack_steps):
+        x_adv.requires_grad = True
+
+        model.zero_grad()
+        logits = model(x_adv)
+
+        if target is None:
+            # Untargeted attacks - gradient ascent
+            loss = criterion(logits, label)
+            loss.backward()
+            grad = x_adv.grad.detach()
+            grad = grad.sign()
+            x_adv = x_adv + alpha * grad
+
+        else:
+            # Targeted attacks - gradient descent
+            assert target.size() == label.size()
+            loss = criterion(logits, label)
+            loss.backward()
+            grad = x_adv.grad.detach()
+            grad = grad.sign()
+            x_adv = x_adv - alpha * grad
+
+        # Projection
+        x_adv = x + torch.clamp(x_adv - x, min=-attack_eps, max=attack_eps)
+        x_adv = x_adv.detach()
+
+    return x_adv
+
 class LeafData(Dataset):
-    def __init__(self, df, transforms=None):
+    def __init__(self, df, transforms=None, tta=None):
+        self.tta = tta
         self.data = df
         self.transforms = transforms
         
@@ -26,12 +77,21 @@ class LeafData(Dataset):
         path, label = self.data.iloc[idx]
         img = cv2.imread(path)
         
+        if self.tta:
+            images = []
+            for _ in range(self.tta):
+                if self.transforms:
+                    images.append(self.transforms(image=img)["image"])
+
+            images = [img.transpose(2, 0, 1) for img in images]
+            images = [torch.from_numpy(img) for img in images]
+
+            return images, label
+
         if self.transforms:
             img = self.transforms(image=img)["image"]
-            
-        img = img.transpose(2, 0, 1)
-        img = torch.from_numpy(img)
-        return img, label
+
+        return torch.from_numpy(img.transpose(2, 0, 1)), label
 
 def get_weights(df):
     value_counts = df["label"].value_counts()
@@ -68,49 +128,52 @@ def main(opt):
 
     # Augmentations
     train_trans = albu.Compose([
+            albu.RandomResizedCrop(*opt.input_shape),
             albu.VerticalFlip(),
             albu.HorizontalFlip(),
-            albu.RandomRotate90(),
-            albu.GaussNoise(),
-            albu.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.2, rotate_limit=45, p=0.4),
-            albu.RandomCrop(512, 512),
-            albu.Resize(256, 256),
-            albu.Cutout(max_h_size=32, max_w_size=32, p=0.5),
+            albu.Transpose(p=0.5),
+            albu.ShiftScaleRotate(p=0.5),
+            albu.HueSaturationValue(hue_shift_limit=0.2, sat_shift_limit=0.2, val_shift_limit=0.2, p=0.5),
+            albu.RandomBrightnessContrast(brightness_limit=(-0.1,0.1), contrast_limit=(-0.1, 0.1), p=0.5),
+            albu.CoarseDropout(p=0.5),
+            albu.Cutout(p=0.5),
             albu.Normalize()
         ])
 
     val_trans = albu.Compose([
-            albu.CenterCrop(512, 512),
-            albu.Resize(256, 256),
+            albu.RandomResizedCrop(*opt.input_shape),
+            albu.VerticalFlip(),
+            albu.HorizontalFlip(),
+            albu.ShiftScaleRotate(p=0.5),
+            albu.HueSaturationValue(hue_shift_limit=0.2, sat_shift_limit=0.2, val_shift_limit=0.2, p=0.5),
+            albu.RandomBrightnessContrast(brightness_limit=(-0.1,0.1), contrast_limit=(-0.1, 0.1), p=0.5),
             albu.Normalize() 
         ])
 
     # Dataset init
     data_train = LeafData(train_df, transforms=train_trans)
-    data_val = LeafData(val_df, transforms=val_trans)
+    data_val = LeafData(val_df, transforms=val_trans, tta=opt.tta)
     weights = get_weights(train_df)
     sampler_train = WeightedRandomSampler(weights, len(data_train))
-    dataloader_train = DataLoader(data_train, batch_size=opt.batch_size, sampler=sampler_train, num_workers=opt.num_workers)
+    dataloader_train = DataLoader(data_train, batch_size=opt.batch_size, shuffle=True, num_workers=opt.num_workers)
     dataloader_val = DataLoader(data_val, shuffle=True, batch_size=8, num_workers=opt.num_workers)
 
     # Model init
-    model = GENet.genet_large(pretrained=True, root=opt.genet_checkpoint)
-    model.fc_linear = nn.Linear(model.last_channels, 5, bias=True)
-    gpu = 0
-    torch.cuda.set_device(gpu)
-    model = model.cuda(0)
+    model = timm.create_model(opt.model_arch, pretrained=True)
+    model.classifier = nn.Linear(model.classifier.in_features, 5)
+    model.to(device)
 
     # freeze first opt.freeze_percent params
     param_count = len(list(model.parameters()))
     for param in list(model.parameters())[:int(param_count*opt.freeze_percent/100)]:
         param.requires_grad = False
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=opt.lr, weight_decay=4e-5)
-    scheduler = StepLR(optimizer, step_size=5, gamma=0.5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=opt.lr, weight_decay=1e-6)
+    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=opt.num_epoch, T_mult=1, eta_min=1e-6, last_epoch=-1)
     criterion = get_loss(opt)
 
     best_acc = 0
-    iteration_per_epoch = iteration_per_epoch if opt.iteration_per_epoch else len(dataloader_train)
+    iteration_per_epoch = opt.iteration_per_epoch if opt.iteration_per_epoch else len(dataloader_train)
     for epoch in range(opt.num_epoch):
         # Train
         model.train()
@@ -126,6 +189,10 @@ def main(opt):
             
             images = images.to(device)
             labels = labels.to(device)
+
+            if opt.adversarial_attack:
+                idx_for_attack = list(rng.choice(labels.size(0), size=labels.size(0) // 4))
+                images[idx_for_attack] = pgd_attack(images[idx_for_attack], labels[idx_for_attack], model, criterion)
             
             logit = model(images)
             loss = criterion(logit, labels)
@@ -133,12 +200,14 @@ def main(opt):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            scheduler.step(epoch + step/iteration_per_epoch)
             
             _, predicted = torch.max(logit.data, 1)
             accuracy = 100 * (predicted == labels).sum().item() / labels.size(0)
-            pbar.set_postfix({"Accuracy": accuracy, "Loss": loss.cpu().data.numpy().item()})
+            pbar.set_postfix({"Accuracy": accuracy, "Loss": loss.cpu().data.numpy().item(), "LR": optimizer.param_groups[0]["lr"]})
             logger.add_scalar('Loss/Train', loss.cpu().data.numpy().item(), epoch*iteration_per_epoch + step + 1)
             logger.add_scalar('Accuracy/Train', accuracy, epoch*iteration_per_epoch + step + 1)
+            logger.add_scalar('LR/Train', optimizer.param_groups[0]["lr"], epoch*iteration_per_epoch + step + 1)
         
         # Val
         print(f"Eval start! Epoch {epoch + 1}/{opt.num_epoch}")
@@ -156,17 +225,35 @@ def main(opt):
                 dataloader_iterator = iter(dataloader_val)
                 images, labels = next(dataloader_iterator)
 
-            images = images.to(device)
             labels = labels.to(device)
-            
-            with torch.no_grad():
-                logit = model(images)
 
-            loss = criterion(logit, labels)
-            loss_sum += loss.cpu().data.numpy().item()
+            if opt.tta:
+                predicts = []
+                loss_tta = 0
+                for i in range(opt.tta):
+                    img = images[i].to(device)
+            
+                    with torch.no_grad():
+                        logit = model(img)
+
+                    loss = criterion(logit, labels)
+                    loss_tta += loss.cpu().data.numpy().item() / opt.tta
+                    predicts.append(F.softmax(logit, dim=-1)[None, ...])
+                
+                predicts = torch.cat(predicts, dim=0).mean(dim=0)
+                loss_sum += loss_tta
+
+            else:
+                images = images.to(device)
+                with torch.no_grad():
+                    logit = model(images)
+
+                loss = criterion(logit, labels)
+                predicts = F.softmax(logit, dim=-1)
+                loss_sum += loss.cpu().data.numpy().item()
 
             #accuracy
-            _, predicted = torch.max(logit.data, 1)
+            _, predicted = torch.max(predicts.data, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
 
@@ -190,7 +277,6 @@ def main(opt):
                     "config": opt,
                 }, 
                 os.path.join("./artifacts_train", "checkpoints", current_version, f"{epoch + 1}_accuracy_{accuracy:.5f}.pth"))
-        scheduler.step()
 
 if __name__ == "__main__":
     from addict import Dict

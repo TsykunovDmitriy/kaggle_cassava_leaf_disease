@@ -8,6 +8,29 @@ def get_loss(opt):
         return nn.CrossEntropyLoss()
     elif opt.loss == "fl":
         return FocalLoss(gamma=opt.gamma)
+    elif opt.loss == "lsce":
+        return LabelSmoothingCrossEntropy(epsilon=opt.smoothing)
+
+
+class LabelSmoothingCrossEntropy(nn.Module):
+    def __init__(self, epsilon: float = 0.1, reduction='mean'):
+        super().__init__()
+        self.epsilon = epsilon
+        self.reduction = reduction
+
+    def linear_combination(self, x, y):
+        return self.epsilon * x + (1 - self.epsilon) * y
+
+    def reduce_loss(self, loss):
+        return loss.mean() if self.reduction == 'mean' else loss.sum() if self.reduction == 'sum' else loss
+
+    def forward(self, preds, target):
+        n = preds.size()[-1]
+        log_preds = F.log_softmax(preds, dim=-1)
+        loss = self.reduce_loss(-log_preds.sum(dim=-1))
+        nll = F.nll_loss(log_preds, target, reduction=self.reduction)
+        return self.linear_combination(loss / n, nll)
+
 
 class FocalLoss(nn.Module):
     def __init__(self, gamma=0, alpha=None, size_average=True):
