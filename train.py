@@ -1,6 +1,7 @@
 import os
 import cv2
 import timm
+import json
 import torch
 import numpy as np
 import pandas as pd
@@ -97,6 +98,13 @@ def get_weights(df):
     value_counts = df["label"].value_counts()
     return [1/value_counts[df["label"][i]] for i in range(len(df))]
 
+def get_pretrained(opt):
+    pretrained_dir = opt.pretrained_dir
+    with open(os.path.join(pretrained_dir, "index.json"), "r") as f:
+        pretrained_index = json.load(f)
+    pretrained_path = os.path.join(pretrained_dir, "efficientnet", pretrained_index["efficientnet"][opt.model_arch])
+    return pretrained_path
+
 def main(opt):
     torch.manual_seed(opt.seed)
 
@@ -159,7 +167,9 @@ def main(opt):
     dataloader_val = DataLoader(data_val, shuffle=True, batch_size=8, num_workers=opt.num_workers)
 
     # Model init
-    model = timm.create_model(opt.model_arch, pretrained=True)
+    model = timm.create_model(opt.model_arch, pretrained=False)
+    pretrained_path = get_pretrained(opt)
+    model.load_state_dict(torch.load(pretrained_path, map_location=device))
     model.classifier = nn.Linear(model.classifier.in_features, 5)
     model.to(device)
 

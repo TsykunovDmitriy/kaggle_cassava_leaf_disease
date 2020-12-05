@@ -10,6 +10,7 @@ train_config = {
     "tta": 3,
 
     "model_arch": "tf_efficientnet_b3_ns",
+    "pretrained_dir": "../timm_pretrained_effnet/",
     "genet_checkpoint": "./GENet_params/",
     "freeze_percent": 0,
     "loss": "lsce",

@@ -8,7 +8,7 @@ import albumentations as albu
 import torch.nn.functional as F
 
 def main(opt):
-    device = torch.device("cpu")
+    device = torch.device("cuda")
 
     current_checkpoint = [
             os.path.join("./artifacts_train", "checkpoints", opt.version, name)
@@ -30,7 +30,7 @@ def main(opt):
             albu.Normalize()
         ])
 
-    model = timm.create_model(opt.model_arch, pretrained=True)
+    model = timm.create_model(opt.model_arch, pretrained=False)
     model.classifier = nn.Linear(model.classifier.in_features, 5)
     model.load_state_dict(torch.load(checkpoint, map_location=device)["model_state_dict"])
     model.to(device)
